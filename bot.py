@@ -57,6 +57,10 @@ class StudyForm(StatesGroup):
 class EditDeckForm(StatesGroup):
     waiting_for_new_name = State()
 
+class EditCardForm(StatesGroup):
+    waiting_for_new_sk = State()
+    waiting_for_new_ua = State()
+
 def get_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
@@ -153,7 +157,7 @@ async def finish_add_callback(call: types.CallbackQuery):
     await call.message.answer("Збереження завершено! Можете розпочати тренування у головному меню.")
     await call.answer()
 
-# --- УПРАВЛІННЯ НАБОРАМИ (РЕДАГУВАННЯ ТА ВИДАЛЕННЯ) ---
+# --- УПРАВЛІННЯ НАБОРАМИ ТА КАРТКАМИ ---
 @dp.message(F.text == "⚙️ Управління наборами")
 async def manage_decks(message: types.Message):
     user_id = message.from_user.id
@@ -172,18 +176,20 @@ async def manage_decks(message: types.Message):
         builder.button(text=f"📁 {deck}", callback_data=f"deck_menu:{deck}")
     builder.adjust(1)
 
-    await message.answer("Оберіть набір для редагування або видалення:", reply_markup=builder.as_markup())
+    await message.answer("Оберіть набір для керування:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("deck_menu:"))
 async def deck_menu_callback(call: types.CallbackQuery):
     deck_name = call.data.split(":")[1]
     builder = InlineKeyboardBuilder()
-    builder.button(text="✏️ Перейменувати", callback_data=f"rename_deck:{deck_name}")
-    builder.button(text="🗑 Видалити набір", callback_data=f"confirm_delete:{deck_name}")
-    builder.button(text="⬅️ Назад", callback_data="back_to_manage")
-    builder.adjust(2, 1)
+    builder.button(text="🎴 Список карток / Редагувати", callback_data=f"list_cards:{deck_name}")
+    builder.button(text="➕ Додати картку в набір", callback_data=f"add_more:{deck_name}")
+    builder.button(text="✏️ Перейменувати набір", callback_data=f"rename_deck:{deck_name}")
+    builder.button(text="🗑 Видалити весь набір", callback_data=f"confirm_delete:{deck_name}")
+    builder.button(text="⬅️ До списку наборів", callback_data="back_to_manage")
+    builder.adjust(1)
 
-    await call.message.edit_text(f"Опції для набору <b>{deck_name}</b>:", parse_mode="HTML", reply_markup=builder.as_markup())
+    await call.message.edit_text(f"Керування набором <b>{deck_name}</b>:", parse_mode="HTML", reply_markup=builder.as_markup())
     await call.answer()
 
 @dp.callback_query(F.data == "back_to_manage")
@@ -200,10 +206,139 @@ async def back_to_manage_callback(call: types.CallbackQuery):
         builder.button(text=f"📁 {deck}", callback_data=f"deck_menu:{deck}")
     builder.adjust(1)
 
-    await call.message.edit_text("Оберіть набір для редагування або видалення:", reply_markup=builder.as_markup())
+    await call.message.edit_text("Оберіть набір для керування:", reply_markup=builder.as_markup())
     await call.answer()
 
-# Перейменування
+# Список усіх карток набору
+@dp.callback_query(F.data.startswith("list_cards:"))
+async def list_cards_callback(call: types.CallbackQuery):
+    deck_name = call.data.split(":")[1]
+    user_id = call.from_user.id
+    
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, sk_word, ua_word FROM cards WHERE user_id = ? AND deck_name = ?", (user_id, deck_name))
+    cards = cursor.fetchall()
+    conn.close()
+
+    if not cards:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data=f"deck_menu:{deck_name}")
+        await call.message.edit_text(f"У наборі <b>{deck_name}</b> поки немає карток.", parse_mode="HTML", reply_markup=builder.as_markup())
+        await call.answer()
+        return
+
+    builder = InlineKeyboardBuilder()
+    for card_id, sk, ua in cards:
+        builder.button(text=f"{ua} ↔️ {sk}", callback_data=f"card_menu:{card_id}")
+    builder.button(text="⬅️ Назад", callback_data=f"deck_menu:{deck_name}")
+    builder.adjust(1)
+
+    await call.message.edit_text(f"Картки в наборі <b>{deck_name}</b> (натисніть на картку для дій):", parse_mode="HTML", reply_markup=builder.as_markup())
+    await call.answer()
+
+# Меню окремої картки (видалення / редагування)
+@dp.callback_query(F.data.startswith("card_menu:"))
+async def card_menu_callback(call: types.CallbackQuery):
+    card_id = int(call.data.split(":")[1])
+    
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT deck_name, sk_word, ua_word FROM cards WHERE id = ?", (card_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        await call.answer("Картку не знайдено.")
+        return
+
+    deck_name, sk, ua = row
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Змінити словацький варіант", callback_data=f"edit_sk:{card_id}")
+    builder.button(text="✏️ Змінити український варіант", callback_data=f"edit_ua:{card_id}")
+    builder.button(text="🗑 Видалити цю картку", callback_data=f"delete_card:{card_id}")
+    builder.button(text="⬅️ Назад до карток", callback_data=f"list_cards:{deck_name}")
+    builder.adjust(1)
+
+    await call.message.edit_text(
+        f"Картка:\n🇺🇦 <b>{ua}</b>\n🇸🇰 <b>{sk}</b>\n\nОберіть дію:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+    await call.answer()
+
+# Редагування словацького слова
+@dp.callback_query(F.data.startswith("edit_sk:"))
+async def edit_sk_callback(call: types.CallbackQuery, state: FSMContext):
+    card_id = int(call.data.split(":")[1])
+    await state.update_data(edit_card_id=card_id)
+    await call.message.answer("Введіть новий словацький варіант:")
+    await state.set_state(EditCardForm.waiting_for_new_sk)
+    await call.answer()
+
+@dp.message(EditCardForm.waiting_for_new_sk)
+async def process_new_sk(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    card_id = data["edit_card_id"]
+    new_sk = message.text.strip()
+
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE cards SET sk_word = ? WHERE id = ?", (new_sk, card_id))
+    conn.commit()
+    conn.close()
+
+    await message.answer(f"✅ Словацьке слово успішно змінено на <b>{new_sk}</b>!", parse_mode="HTML")
+    await state.clear()
+
+# Редагування українського перекладу
+@dp.callback_query(F.data.startswith("edit_ua:"))
+async def edit_ua_callback(call: types.CallbackQuery, state: FSMContext):
+    card_id = int(call.data.split(":")[1])
+    await state.update_data(edit_card_id=card_id)
+    await call.message.answer("Введіть новий український переклад:")
+    await state.set_state(EditCardForm.waiting_for_new_ua)
+    await call.answer()
+
+@dp.message(EditCardForm.waiting_for_new_ua)
+async def process_new_ua(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    card_id = data["edit_card_id"]
+    new_ua = message.text.strip()
+
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE cards SET ua_word = ? WHERE id = ?", (new_ua, card_id))
+    conn.commit()
+    conn.close()
+
+    await message.answer(f"✅ Українське слово успішно змінено на <b>{new_ua}</b>!", parse_mode="HTML")
+    await state.clear()
+
+# Видалення окремої картки
+@dp.callback_query(F.data.startswith("delete_card:"))
+async def delete_card_callback(call: types.CallbackQuery):
+    card_id = int(call.data.split(":")[1])
+
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT deck_name FROM cards WHERE id = ?", (card_id,))
+    row = cursor.fetchone()
+    if row:
+        deck_name = row[0]
+        cursor.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+        conn.commit()
+        conn.close()
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад до списку карток", callback_data=f"list_cards:{deck_name}")
+        await call.message.edit_text("🗑 Картку успішно видалено!", reply_markup=builder.as_markup())
+    else:
+        conn.close()
+        await call.message.edit_text("Картку не знайдено.")
+    await call.answer()
+
+# Перейменування набору
 @dp.callback_query(F.data.startswith("rename_deck:"))
 async def rename_deck_callback(call: types.CallbackQuery, state: FSMContext):
     deck_name = call.data.split(":")[1]
@@ -229,12 +364,12 @@ async def process_rename_deck(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Набір <b>{old_name}</b> успішно перейменовано на <b>{new_name}</b>!", parse_mode="HTML")
     await state.clear()
 
-# Видалення
+# Видалення всього набору
 @dp.callback_query(F.data.startswith("confirm_delete:"))
 async def confirm_delete_callback(call: types.CallbackQuery):
     deck_name = call.data.split(":")[1]
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔥 Так, видалити", callback_data=f"delete_deck:{deck_name}")
+    builder.button(text="🔥 Так, видалити весь набір", callback_data=f"delete_deck:{deck_name}")
     builder.button(text="❌ Скасувати", callback_data="back_to_manage")
     builder.adjust(1, 1)
 
@@ -475,3 +610,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+    
