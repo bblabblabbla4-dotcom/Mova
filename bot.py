@@ -54,6 +54,9 @@ class CardForm(StatesGroup):
 class StudyForm(StatesGroup):
     answering = State()
 
+class EditDeckForm(StatesGroup):
+    waiting_for_new_name = State()
+
 def get_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
@@ -65,10 +68,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
     builder.button(text="➕ Створити / Додати в набір")
     builder.button(text="🧠 Вчити слова")
     builder.button(text="📊 Статистика наборів")
-    builder.adjust(2, 1)
+    builder.button(text="⚙️ Управління наборами")
+    builder.adjust(2, 2)
     
     await message.answer(
-        "Привіт! Я твій розширений помічник для вивчення словацької мови 🇸🇰\n"
+        "Привіт! Я твій помічник для вивчення словацької мови 🇸🇰\n"
         "Обери потрібну дію на клавіатурі нижче:",
         reply_markup=builder.as_markup(resize_keyboard=True)
     )
@@ -147,6 +151,113 @@ async def add_more_callback(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "finish_add")
 async def finish_add_callback(call: types.CallbackQuery):
     await call.message.answer("Збереження завершено! Можете розпочати тренування у головному меню.")
+    await call.answer()
+
+# --- УПРАВЛІННЯ НАБОРАМИ (РЕДАГУВАННЯ ТА ВИДАЛЕННЯ) ---
+@dp.message(F.text == "⚙️ Управління наборами")
+async def manage_decks(message: types.Message):
+    user_id = message.from_user.id
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT deck_name FROM cards WHERE user_id = ?", (user_id,))
+    decks = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    if not decks:
+        await message.answer("У вас поки немає створених наборів.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    for deck in decks:
+        builder.button(text=f"📁 {deck}", callback_data=f"deck_menu:{deck}")
+    builder.adjust(1)
+
+    await message.answer("Оберіть набір для редагування або видалення:", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("deck_menu:"))
+async def deck_menu_callback(call: types.CallbackQuery):
+    deck_name = call.data.split(":")[1]
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Перейменувати", callback_data=f"rename_deck:{deck_name}")
+    builder.button(text="🗑 Видалити набір", callback_data=f"confirm_delete:{deck_name}")
+    builder.button(text="⬅️ Назад", callback_data="back_to_manage")
+    builder.adjust(2, 1)
+
+    await call.message.edit_text(f"Опції для набору <b>{deck_name}</b>:", parse_mode="HTML", reply_markup=builder.as_markup())
+    await call.answer()
+
+@dp.callback_query(F.data == "back_to_manage")
+async def back_to_manage_callback(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT deck_name FROM cards WHERE user_id = ?", (user_id,))
+    decks = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    builder = InlineKeyboardBuilder()
+    for deck in decks:
+        builder.button(text=f"📁 {deck}", callback_data=f"deck_menu:{deck}")
+    builder.adjust(1)
+
+    await call.message.edit_text("Оберіть набір для редагування або видалення:", reply_markup=builder.as_markup())
+    await call.answer()
+
+# Перейменування
+@dp.callback_query(F.data.startswith("rename_deck:"))
+async def rename_deck_callback(call: types.CallbackQuery, state: FSMContext):
+    deck_name = call.data.split(":")[1]
+    await state.update_data(old_deck_name=deck_name)
+    await call.message.answer(f"Введіть нову назву для набору <b>{deck_name}</b>:", parse_mode="HTML")
+    await state.set_state(EditDeckForm.waiting_for_new_name)
+    await call.answer()
+
+@dp.message(EditDeckForm.waiting_for_new_name)
+async def process_rename_deck(message: types.Message, state: FSMContext):
+    new_name = message.text.strip()
+    data = await state.get_data()
+    old_name = data["old_deck_name"]
+    user_id = message.from_user.id
+
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE cards SET deck_name = ? WHERE user_id = ? AND deck_name = ?", (new_name, user_id, old_name))
+    cursor.execute("UPDATE stats SET deck_name = ? WHERE user_id = ? AND deck_name = ?", (new_name, user_id, old_name))
+    conn.commit()
+    conn.close()
+
+    await message.answer(f"✅ Набір <b>{old_name}</b> успішно перейменовано на <b>{new_name}</b>!", parse_mode="HTML")
+    await state.clear()
+
+# Видалення
+@dp.callback_query(F.data.startswith("confirm_delete:"))
+async def confirm_delete_callback(call: types.CallbackQuery):
+    deck_name = call.data.split(":")[1]
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔥 Так, видалити", callback_data=f"delete_deck:{deck_name}")
+    builder.button(text="❌ Скасувати", callback_data="back_to_manage")
+    builder.adjust(1, 1)
+
+    await call.message.edit_text(
+        f"⚠️ Ви дійсно хочете видалити набір <b>{deck_name}</b> та всі його картки?",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("delete_deck:"))
+async def delete_deck_callback(call: types.CallbackQuery):
+    deck_name = call.data.split(":")[1]
+    user_id = call.from_user.id
+
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM cards WHERE user_id = ? AND deck_name = ?", (user_id, deck_name))
+    cursor.execute("DELETE FROM stats WHERE user_id = ? AND deck_name = ?", (user_id, deck_name))
+    conn.commit()
+    conn.close()
+
+    await call.message.edit_text(f"🗑 Набір <b>{deck_name}</b> успішно видалено!", parse_mode="HTML")
     await call.answer()
 
 # --- СТАТИСТИКА ---
@@ -310,7 +421,6 @@ async def check_answer(message: types.Message, state: FSMContext):
         builder.button(text="🏳️ Не знаю (показати відповідь)", callback_data="give_up")
         await message.answer("❌ Не зовсім так. Спробуйте ще раз або натисніть кнопку нижче:", reply_markup=builder.as_markup())
 
-# --- РЕДАГУВАННЯ ПІДПИСУ ТА ЗАХИСТ ВІД ПОВТОРНИХ КЛІКІВ ---
 @dp.callback_query(F.data == "give_up")
 async def give_up_callback(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -365,8 +475,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-  
-    
-    
-   
