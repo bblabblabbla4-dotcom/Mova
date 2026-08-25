@@ -3,6 +3,7 @@ import logging
 import sqlite3
 from difflib import SequenceMatcher
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -19,7 +20,6 @@ dp = Dispatcher(storage=MemoryStorage())
 def init_db():
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    # Таблиця карток
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS cards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +30,6 @@ def init_db():
             ua_word TEXT
         )
     """)
-    # Таблиця статистики користувачів по наборах
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS stats (
             user_id INTEGER,
@@ -102,13 +101,13 @@ async def process_deck_name(message: types.Message, state: FSMContext):
 async def process_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     await state.update_data(photo_id=photo_id)
-    await message.answer("Крок 2/3: Напишіть слово **словацькою** мовою:")
+    await message.answer("Крок 2/3: Напишіть слово <b>словацькою</b> мовою:", parse_mode="HTML")
     await state.set_state(CardForm.waiting_for_sk)
 
 @dp.message(CardForm.waiting_for_sk)
 async def process_sk(message: types.Message, state: FSMContext):
     await state.update_data(sk_word=message.text.strip())
-    await message.answer("Крок 3/3: Напишіть переклад **українською** мовою:")
+    await message.answer("Крок 3/3: Напишіть переклад <b>українською</b> мовою:", parse_mode="HTML")
     await state.set_state(CardForm.waiting_for_ua)
 
 @dp.message(CardForm.waiting_for_ua)
@@ -117,14 +116,12 @@ async def process_ua(message: types.Message, state: FSMContext):
     data = await state.get_data()
     deck_name = data["deck_name"]
     
-    # Зберігаємо в базу даних
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO cards (user_id, deck_name, photo_id, sk_word, ua_word) VALUES (?, ?, ?, ?, ?)",
         (user_id, deck_name, data["photo_id"], data["sk_word"], message.text.strip())
     )
-    # Ініціалізуємо статистику, якщо її ще немає
     cursor.execute(
         "INSERT OR IGNORE INTO stats (user_id, deck_name, learned, failed) VALUES (?, ?, 0, 0)",
         (user_id, deck_name)
@@ -143,7 +140,7 @@ async def process_ua(message: types.Message, state: FSMContext):
 async def add_more_callback(call: types.CallbackQuery, state: FSMContext):
     deck_name = call.data.split(":")[1]
     await state.update_data(deck_name=deck_name)
-    await call.message.answer(f"Набір: **{deck_name}**.\nНадішліть фотографію для нової картки:")
+    await call.message.answer(f"Набір: <b>{deck_name}</b>.\nНадішліть фотографію для нової картки:", parse_mode="HTML")
     await state.set_state(CardForm.waiting_for_photo)
     await call.answer()
 
@@ -167,17 +164,17 @@ async def show_statistics(message: types.Message):
         await message.answer("У вас поки немає статистики. Створіть набір та почніть навчання!")
         return
         
-    text = "📊 **Ваша статистика вивчення:**\n\n"
+    text = "📊 <b>Ваша статистика вивчення:</b>\n\n"
     for deck_name, learned, failed in rows:
         cursor.execute("SELECT COUNT(*) FROM cards WHERE user_id = ? AND deck_name = ?", (user_id, deck_name))
         total = cursor.fetchone()[0]
-        text = text + f"📁 **Набір: `{deck_name}`\n" \
-                      f"  • Всього слів: {total}\n" \
-                      f"  • Знаю (успішно): {learned}\n" \
-                      f"  • Не знаю (помилки/здався): {failed}\n\n"
+        text += f"📁 <b>Набір: <code>{deck_name}</code></b>\n" \
+                f"  • Всього слів: {total}\n" \
+                f"  • Знаю (успішно): {learned}\n" \
+                f"  • Не знаю (помилки/здався): {failed}\n\n"
                       
     conn.close()
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 # --- ВИВЧЕННЯ СЛІВ ---
 @dp.message(F.text == "🧠 Вчити слова")
@@ -246,12 +243,12 @@ async def send_next_card(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="🏳️ Не знаю (показати відповідь)", callback_data="give_up")
     
-    caption = f"Перекладіть словацькою:\n**\n\n*(Картка {idx + 1} з {len(cards)})*"
+    caption = f"Перекладіть словацькою:\n<b>{card['ua']}</b> 🇺🇦\n\n<i>(Картка {idx + 1} з {len(cards)})</i>"
     
     await message.answer_photo(
         photo=card["photo_id"],
         caption=caption,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
     await state.set_state(StudyForm.answering)
@@ -295,7 +292,7 @@ async def check_answer(message: types.Message, state: FSMContext):
         if similarity == 1.0:
             await message.answer("✨ Ідеально правильно!")
         else:
-            await message.answer(f"✅ Зараховано! (Правильне написання: **{correct_ans})")
+            await message.answer(f"✅ Зараховано! (Правильне написання: <b>{correct_ans}</b>)", parse_mode="HTML")
             
         await state.update_data(current_idx=idx + 1)
         await send_next_card(message, state)
@@ -304,7 +301,6 @@ async def check_answer(message: types.Message, state: FSMContext):
         conn.commit()
         conn.close()
         
-        # Додаємо у список на переповторення в поточному сеансі
         failed_list = data.get("session_failed", [])
         if card not in failed_list:
             failed_list.append(card)
@@ -314,13 +310,19 @@ async def check_answer(message: types.Message, state: FSMContext):
         builder.button(text="🏳️ Не знаю (показати відповідь)", callback_data="give_up")
         await message.answer("❌ Не зовсім так. Спробуйте ще раз або натисніть кнопку нижче:", reply_markup=builder.as_markup())
 
-@dp.callback_query(StudyForm.answering, F.data == "give_up")
+# --- РЕДАГУВАННЯ ПІДПИСУ ТА ЗАХИСТ ВІД ПОВТОРНИХ КЛІКІВ ---
+@dp.callback_query(F.data == "give_up")
 async def give_up_callback(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    cards = data["cards"]
-    idx = data["current_idx"]
+    cards = data.get("cards", [])
+    idx = data.get("current_idx", 0)
+    
+    if idx >= len(cards):
+        await call.answer()
+        return
+        
     card = cards[idx]
-    deck_name = data["deck_name"]
+    deck_name = data.get("deck_name", "")
     user_id = call.from_user.id
     
     conn = sqlite3.connect("database.db")
@@ -334,7 +336,26 @@ async def give_up_callback(call: types.CallbackQuery, state: FSMContext):
         failed_list.append(card)
     await state.update_data(session_failed=failed_list)
     
-    await call.message.answer(f"Правильна відповідь: **")
+    new_caption = f"Українською: <b>{card['ua']}</b> 🇺🇦\nСловацькою: <b>{card['sk']}</b> 🇸🇰"
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Наступне слово ➡️", callback_data="next_card_after_reveal")
+    
+    try:
+        await call.message.edit_caption(
+            caption=new_caption,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+    except TelegramBadRequest:
+        pass
+        
+    await call.answer()
+
+@dp.callback_query(F.data == "next_card_after_reveal")
+async def next_card_after_reveal(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_idx", 0)
     await state.update_data(current_idx=idx + 1)
     await call.answer()
     await send_next_card(call.message, state)
@@ -344,3 +365,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+  
+    
+    
+   
