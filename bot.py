@@ -514,6 +514,24 @@ async def go_home_callback(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
 @dp.message(StudyForm.answering)
+# --- ОНОВЛЕНИЙ ОБРОБНИК ВІДПОВІДЕЙ ТА ДОПОМІЖНІ ФУНКЦІЇ ---
+
+def check_user_answer(user_input: str, correct_text: str):
+    """
+    Перевіряє, чи підходить відповідь користувача до будь-якого з варіантів, розділених '/'.
+    Повертає Кортеж: (is_correct, matched_option, all_options)
+    """
+    options = [opt.strip() for opt in correct_text.split('/') if opt.strip()]
+    user_clean = user_input.strip().lower()
+    
+    for opt in options:
+        similarity = get_similarity(user_clean, opt.lower())
+        if similarity >= 0.8:
+            return True, opt, options
+            
+    return False, None, options
+
+@dp.message(StudyForm.answering)
 async def check_answer(message: types.Message, state: FSMContext):
     data = await state.get_data()
     cards = data["cards"]
@@ -525,20 +543,26 @@ async def check_answer(message: types.Message, state: FSMContext):
     user_ans = message.text.strip()
     correct_ans = card["sk"]
     
-    similarity = get_similarity(user_ans, correct_ans)
+    is_correct, matched_opt, all_opts = check_user_answer(user_ans, correct_ans)
     
     conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
     
-    if similarity >= 0.8:
+    if is_correct:
         cursor.execute("UPDATE stats SET learned = learned + 1 WHERE user_id = ? AND deck_name = ?", (user_id, deck_name))
         conn.commit()
         conn.close()
         
-        if similarity == 1.0:
-            await message.answer("✨ Ідеально правильно!")
-        else:
-            await message.answer(f"✅ Зараховано! (Правильне написання: <b>{correct_ans}</b>)", parse_mode="HTML")
+        # Формуємо повідомлення
+        msg = "✨ Правильно!"
+        
+        # Якщо варіантів декілька (були розділені '/'), нагадуємо інші варіанти
+        if len(all_opts) > 1:
+            other_opts = [opt for opt in all_opts if opt.lower() != matched_opt.lower()]
+            if other_opts:
+                msg += f"\n💡 <i>Нагадування: також можна вжити:</i> <b>{', '.join(other_opts)}</b>"
+                
+        await message.answer(msg, parse_mode="HTML")
             
         await state.update_data(current_idx=idx + 1)
         await send_next_card(message, state)
@@ -554,7 +578,12 @@ async def check_answer(message: types.Message, state: FSMContext):
         
         builder = InlineKeyboardBuilder()
         builder.button(text="🏳️ Не знаю (показати відповідь)", callback_data="give_up")
-        await message.answer("❌ Не зовсім так. Спробуйте ще раз або натисніть кнопку нижче:", reply_markup=builder.as_markup())
+        
+        hint = f"❌ Не зовсім так. Спробуйте ще раз."
+        if len(all_opts) > 1:
+            hint += f"\n(У цьому слові є {len(all_opts)} варіанти перекладу через '/')"
+            
+        await message.answer(hint, reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "give_up")
 async def give_up_callback(call: types.CallbackQuery, state: FSMContext):
@@ -610,5 +639,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-    
