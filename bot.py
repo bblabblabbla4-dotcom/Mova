@@ -511,14 +511,9 @@ async def go_home_callback(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.answer("Повертаємось у головне меню. Оберіть дію нижче.")
     await call.answer()
-
 # --- ОНОВЛЕНИЙ ОБРОБНИК ВІДПОВІДЕЙ ТА ДОПОМІЖНІ ФУНКЦІЇ ---
 
 def check_user_answer(user_input: str, correct_text: str):
-    """
-    Перевіряє, чи підходить відповідь користувача до будь-якого з варіантів, розділених '/'.
-    Повертає Кортеж: (is_correct, matched_option, all_options)
-    """
     options = [opt.strip() for opt in correct_text.split('/') if opt.strip()]
     user_clean = user_input.strip().lower()
 
@@ -531,6 +526,8 @@ def check_user_answer(user_input: str, correct_text: str):
 
 @dp.message(StudyForm.answering)
 async def check_answer(message: types.Message, state: FSMContext):
+    # далі йде код перевірки...
+
     data = await state.get_data()
     cards = data["cards"]
     idx = data["current_idx"]
