@@ -616,6 +616,7 @@ async def check_answer(message: types.Message, state: FSMContext):
         await message.answer(hint, reply_markup=builder.as_markup())
 
 
+@dp.callback_query(F.data == "give_up", StudyForm.answering)
 @dp.callback_query(F.data == "give_up")
 async def give_up_callback(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -643,6 +644,8 @@ async def give_up_callback(call: types.CallbackQuery, state: FSMContext):
     if card not in failed_list:
         failed_list.append(card)
     await state.update_data(session_failed=failed_list)
+
+    await state.set_state(None)
 
     new_caption = f"Українською: <b>{card['ua']}</b> 🇺🇦\nСловацькою: <b>{card['sk']}</b> 🇸🇰"
 
